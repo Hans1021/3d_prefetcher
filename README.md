@@ -23,8 +23,6 @@ The design was simulated using Verilator and inspected using GTKWave.
 | `address_o` | Output | Prefetched output address |
 | `ready` | Output | Indicates `address_o` is valid |
 
-The prefetcher only accepts a new request while in `IDLE`. The accepted input address is stored internally while its neighbors are generated.
-
 ---
 
 ## Fixed 3 x 3 x 3 Design
@@ -87,23 +85,7 @@ For example, address `13` is the center and produces:
 
 The prefetcher uses the following FSM:
 
-```text
-IDLE
-  ->
-X_MINUS
-  ->
-X_PLUS
-  ->
-Y_MINUS
-  ->
-Y_PLUS
-  ->
-Z_MINUS
-  ->
-Z_PLUS
-  ->
-IDLE
-```
+`IDLE -> X_MINUS -> X_PLUS -> Y_MINUS -> Y_PLUS -> Z_MINUS -> Z_PLUS -> IDLE`
 
 Each direction corresponds to one possible adjacent address.
 
@@ -111,11 +93,13 @@ Invalid directions are skipped, so valid outputs can be produced on consecutive 
 
 While a valid neighbor is being output:
 
-```text
-ready = 1
-```
+`ready = 1`
 
 and `address_o` contains that neighbor.
+
+While `IDLE`:
+
+`ready = 0`
 
 ---
 
@@ -133,7 +117,7 @@ One timing issue appeared when this was first added: while still in `IDLE`, `sto
 
 ## 3 x 3 x 3 Verification
 
-The original `3 x 3 x 3` version was tested with several position types:
+The original `3 x 3 x 3` version was tested with the following positions:
 
 | Input | Position | Expected Outputs |
 | ---: | --- | --- |
@@ -153,7 +137,7 @@ Waveform:
 
 ## Note
 
-The original fixed `3 x 3 x 3` RTL and testbench are also kept in the repository for reference. The main Makefile builds and runs the final parameterized RTL and testbench discussed below.
+The original fixed `3 x 3 x 3` RTL and testbench are kept in the repository for reference. The Makefile only builds and runs the final parameterized RTL and testbench discussed below.
 
 ---
 
@@ -347,7 +331,203 @@ The final implementation only accepts and latches a request when the address is 
 ## SystemVerilog RTL
 
 ```systemverilog
-// RTL
+`timescale 1ns/1ps
+
+`default_nettype none
+
+module prefetcher_3d #(
+    parameter int X_SIZE = 3,
+    parameter int Y_SIZE = 3,
+    parameter int Z_SIZE = 3
+) (
+    input   logic           clk,
+    input   logic           reset,
+    input   logic   [31:0]  address_i,  // input address
+    output  logic   [31:0]  address_o,  // output address(es)
+
+    input   logic           valid,      // 1 if the input address is valid, else 0
+    output  logic           ready       // 1 if the output address is valid, else 0
+);
+
+// Bits for coordinates, edge case of dimension = 1 accounted for
+localparam int X_BITS = (X_SIZE <= 1) ? 1 : $clog2(X_SIZE);
+localparam int Y_BITS = (Y_SIZE <= 1) ? 1 : $clog2(Y_SIZE);
+localparam int Z_BITS = (Z_SIZE <= 1) ? 1 : $clog2(Z_SIZE);
+
+// States
+typedef enum logic [2:0] {
+    IDLE,
+    X_MINUS,
+    X_PLUS,
+    Y_MINUS,
+    Y_PLUS,
+    Z_MINUS,
+    Z_PLUS
+} state_t;
+
+// Latched input address
+logic [31:0] stored_address;
+
+// Address coordinates
+logic [X_BITS-1:0] x;
+logic [Y_BITS-1:0] y;
+logic [Z_BITS-1:0] z;
+
+// Neighbors validity
+logic x_minus_valid, x_plus_valid, y_minus_valid, y_plus_valid, z_minus_valid, z_plus_valid;
+
+state_t state, next_state;
+
+always_comb begin
+    // Get coordinates
+    if (state == IDLE) begin
+        x = X_BITS'(address_i % X_SIZE);
+        y = Y_BITS'(address_i / X_SIZE % Y_SIZE);
+        z = Z_BITS'(address_i / (X_SIZE * Y_SIZE));
+    end else begin
+        x = X_BITS'(stored_address % X_SIZE);
+        y = Y_BITS'(stored_address / X_SIZE % Y_SIZE);
+        z = Z_BITS'(stored_address / (X_SIZE * Y_SIZE));
+    end
+
+    // Get validity
+    x_minus_valid = X_SIZE > 1 && x > 0;
+    x_plus_valid = X_SIZE > 1 && x < X_BITS'(X_SIZE - 1);
+    y_minus_valid = Y_SIZE > 1 && y > 0;
+    y_plus_valid = Y_SIZE > 1 && y < Y_BITS'(Y_SIZE - 1);
+    z_minus_valid = Z_SIZE > 1 && z > 0;
+    z_plus_valid = Z_SIZE > 1 && z < Z_BITS'(Z_SIZE - 1);
+
+    // Find next state
+    unique case (state)
+        IDLE: begin
+            // Added check for address_i in range
+            if (valid && address_i < X_SIZE * Y_SIZE * Z_SIZE) begin
+                if (x_minus_valid)
+                    next_state = X_MINUS;
+                else if (x_plus_valid)
+                    next_state = X_PLUS;
+                else if (y_minus_valid)
+                    next_state = Y_MINUS;
+                else if (y_plus_valid)
+                    next_state = Y_PLUS;
+                else if (z_minus_valid)
+                    next_state = Z_MINUS;
+                else if (z_plus_valid)
+                    next_state = Z_PLUS;
+                else
+                    next_state = IDLE;
+            end else
+                next_state = IDLE;
+
+            ready = 1'b0;
+            address_o = 32'b0;
+        end
+
+        X_MINUS: begin
+            if (x_plus_valid)
+                next_state = X_PLUS;
+            else if (y_minus_valid)
+                next_state = Y_MINUS;
+            else if (y_plus_valid)
+                next_state = Y_PLUS;
+            else if (z_minus_valid)
+                next_state = Z_MINUS;
+            else if (z_plus_valid)
+                next_state = Z_PLUS;
+            else
+                next_state = IDLE;
+
+            address_o = stored_address - 1;
+            ready = 1'b1;
+        end
+
+        X_PLUS: begin
+            if (y_minus_valid)
+                next_state = Y_MINUS;
+            else if (y_plus_valid)
+                next_state = Y_PLUS;
+            else if (z_minus_valid)
+                next_state = Z_MINUS;
+            else if (z_plus_valid)
+                next_state = Z_PLUS;
+            else
+                next_state = IDLE;
+
+            address_o = stored_address + 1;
+            ready = 1'b1;
+        end
+
+        Y_MINUS: begin
+            if (y_plus_valid)
+                next_state = Y_PLUS;
+            else if (z_minus_valid)
+                next_state = Z_MINUS;
+            else if (z_plus_valid)
+                next_state = Z_PLUS;
+            else
+                next_state = IDLE;
+
+            address_o = stored_address - X_SIZE;
+            ready = 1'b1;
+        end
+
+        Y_PLUS: begin
+            if (z_minus_valid)
+                next_state = Z_MINUS;
+            else if (z_plus_valid)
+                next_state = Z_PLUS;
+            else
+                next_state = IDLE;
+
+            address_o = stored_address + X_SIZE;
+            ready = 1'b1;
+        end
+
+        Z_MINUS: begin
+            if (z_plus_valid)
+                next_state = Z_PLUS;
+            else
+                next_state = IDLE;
+
+            address_o = stored_address - X_SIZE * Y_SIZE;
+            ready = 1'b1;
+        end
+
+        Z_PLUS: begin
+            next_state = IDLE;
+
+            address_o = stored_address + X_SIZE * Y_SIZE;
+            ready = 1'b1;
+        end
+
+        default: begin
+            next_state = IDLE;
+            ready = 1'b0;
+            address_o = 32'b0;
+        end
+    endcase
+
+
+end
+
+// Assign defaults and next state, latch input address
+always_ff @(posedge clk) begin
+    if (reset) begin
+        state <= IDLE;
+        stored_address <= 32'b0;
+    end else begin
+        // Added check for address_i in range
+        if (state == IDLE && valid && address_i < X_SIZE * Y_SIZE * Z_SIZE)
+            stored_address <= address_i;
+        state <= next_state;
+    end
+end
+
+endmodule
+
+`default_nettype wire
+
 ```
 
 ---
@@ -355,7 +535,236 @@ The final implementation only accepts and latches a request when the address is 
 ## Testbench
 
 ```systemverilog
-// Testbench
+`timescale 1ns/1ps
+
+module tb_prefetcher_3d;
+
+    logic clk;
+    logic reset;
+
+    // 3x3x3 DUT
+
+    logic [31:0] address_i;
+    logic [31:0] address_o;
+    logic        valid;
+    logic        ready;
+
+    prefetcher_3d dut (
+        .clk       (clk),
+        .reset     (reset),
+        .address_i (address_i),
+        .address_o (address_o),
+        .valid     (valid),
+        .ready     (ready)
+    );
+
+    // 4x3x2 DUT
+
+    logic [31:0] address_i_4x3x2;
+    logic [31:0] address_o_4x3x2;
+    logic        valid_4x3x2;
+    logic        ready_4x3x2;
+
+    prefetcher_3d #(
+        .X_SIZE(4),
+        .Y_SIZE(3),
+        .Z_SIZE(2)
+    ) dut_4x3x2 (
+        .clk       (clk),
+        .reset     (reset),
+        .address_i (address_i_4x3x2),
+        .address_o (address_o_4x3x2),
+        .valid     (valid_4x3x2),
+        .ready     (ready_4x3x2)
+    );
+
+    // 1x3x3 DUT
+
+    logic [31:0] address_i_1x3x3;
+    logic [31:0] address_o_1x3x3;
+    logic        valid_1x3x3;
+    logic        ready_1x3x3;
+
+    prefetcher_3d #(
+        .X_SIZE(1),
+        .Y_SIZE(3),
+        .Z_SIZE(3)
+    ) dut_1x3x3 (
+        .clk       (clk),
+        .reset     (reset),
+        .address_i (address_i_1x3x3),
+        .address_o (address_o_1x3x3),
+        .valid     (valid_1x3x3),
+        .ready     (ready_1x3x3)
+    );
+
+    always #5 clk <= ~clk;
+
+    // Display outputs
+    always @(posedge clk) begin
+        if (ready)
+            $display("3x3x3: time=%0t input=%0d output=%0d",
+                     $time, address_i, address_o);
+
+        if (ready_4x3x2)
+            $display("4x3x2: time=%0t input=%0d output=%0d",
+                     $time, address_i_4x3x2, address_o_4x3x2);
+
+        if (ready_1x3x3)
+            $display("1x3x3: time=%0t input=%0d output=%0d",
+                     $time, address_i_1x3x3, address_o_1x3x3);
+    end
+
+    initial begin
+
+        $dumpfile("waveform.vcd");
+        $dumpvars(0, tb_prefetcher_3d);
+
+        clk   = 0;
+        reset = 1;
+
+        address_i = 0;
+        valid     = 0;
+
+        address_i_4x3x2 = 0;
+        valid_4x3x2     = 0;
+
+        address_i_1x3x3 = 0;
+        valid_1x3x3     = 0;
+
+
+        // Reset
+        #20;
+        reset = 0;
+
+
+        // ============
+        // 3x3x3 TESTS
+        // ============
+
+        // Test 1: corner 0
+        // Expected: 1, 3, 9
+        @(negedge clk);
+        address_i = 0;
+        valid = 1;
+
+        @(negedge clk);
+        valid = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // Test 2: center 13
+        // Expected: 12, 14, 10, 16, 4, 22
+        address_i = 13;
+        valid = 1;
+
+        @(negedge clk);
+        valid = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // Test 3: corner 26
+        // Expected: 25, 23, 17
+        address_i = 26;
+        valid = 1;
+
+        @(negedge clk);
+        valid = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // Test 4: face point 10
+        // Expected: 9, 11, 13, 1, 19
+        address_i = 10;
+        valid = 1;
+
+        @(negedge clk);
+        valid = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // Test 5: edge point 9
+        // Expected: 10, 12, 0, 18
+        address_i = 9;
+        valid = 1;
+
+        @(negedge clk);
+        valid = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // =======================
+        // 4x3x2 TESTS
+        //
+        // x offset = 1
+        // y offset = 4
+        // z offset = 12
+        // valid addresses = 0-23
+        // =======================
+
+        // Test 6: corner 0
+        // Expected: 1, 4, 12
+        address_i_4x3x2 = 0;
+        valid_4x3x2 = 1;
+
+        @(negedge clk);
+        valid_4x3x2 = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // Test 7: address 17 = (1,1,1)
+        // Expected: 16, 18, 13, 21, 5
+        address_i_4x3x2 = 17;
+        valid_4x3x2 = 1;
+
+        @(negedge clk);
+        valid_4x3x2 = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // Test 8: invalid address
+        // 4*3*2 = 24 elements, so address 24 is out of range
+        // Expected: no output
+        address_i_4x3x2 = 24;
+        valid_4x3x2 = 1;
+
+        @(negedge clk);
+        valid_4x3x2 = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        // ===============
+        // 1x3x3 TEST
+        //
+        // No x neighbors
+        // y offset = 1
+        // z offset = 3
+        // ===============
+
+        // Test 9: address 4 = (0,1,1)
+        // Expected: 3, 5, 1, 7
+        address_i_1x3x3 = 4;
+        valid_1x3x3 = 1;
+
+        @(negedge clk);
+        valid_1x3x3 = 0;
+
+        repeat (8) @(negedge clk);
+
+
+        $finish;
+    end
+
+endmodule
+
 ```
 
 ---
