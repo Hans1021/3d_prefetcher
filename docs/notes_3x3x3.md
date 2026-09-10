@@ -1,6 +1,6 @@
 # Notes
 
-Assuming a 3 x 3 x 3 cube with addresses 0-26 first. Using (x,y,z) coordinates:
+Assuming a 3 x 3 x 3 cube with addresses 0-26 first. Using (x,y,z) coordinates.
 
 ## z = 0
 
