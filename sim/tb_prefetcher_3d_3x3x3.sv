@@ -28,7 +28,7 @@ module tb_prefetcher_3d_3x3x3;
     initial begin
 
         $dumpfile("waveform.vcd");
-        $dumpvars(0, tb_prefetcher_3d);
+        $dumpvars(0, tb_prefetcher_3d_3x3x3);
 
         clk       = 0;
         reset     = 1;
