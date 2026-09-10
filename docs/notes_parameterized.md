@@ -1,8 +1,8 @@
 # Notes
 
-Parameterized version for an X_SIZE x Y_SIZE x Z_SIZE prism
+Parameterized version for an `X_SIZE x Y_SIZE x Z_SIZE` prism
 
-Addresses range from: 0 to X_SIZE \* Y_SIZE \* Z_SIZE - 1
+Addresses range from: `0` to `X_SIZE \* Y_SIZE \* Z_SIZE - 1`
 
 ## Neighbors
 
