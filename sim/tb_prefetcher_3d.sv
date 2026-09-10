@@ -95,11 +95,9 @@ module tb_prefetcher_3d;
         address_i_1x3x3 = 0;
         valid_1x3x3     = 0;
 
-
         // Reset
         #20;
         reset = 0;
-
 
         // ============
         // 3x3x3 TESTS
@@ -116,7 +114,6 @@ module tb_prefetcher_3d;
 
         repeat (8) @(negedge clk);
 
-
         // Test 2: center 13
         // Expected: 12, 14, 10, 16, 4, 22
         address_i = 13;
@@ -126,7 +123,6 @@ module tb_prefetcher_3d;
         valid = 0;
 
         repeat (8) @(negedge clk);
-
 
         // Test 3: corner 26
         // Expected: 25, 23, 17
@@ -138,7 +134,6 @@ module tb_prefetcher_3d;
 
         repeat (8) @(negedge clk);
 
-
         // Test 4: face point 10
         // Expected: 9, 11, 13, 1, 19
         address_i = 10;
@@ -149,7 +144,6 @@ module tb_prefetcher_3d;
 
         repeat (8) @(negedge clk);
 
-
         // Test 5: edge point 9
         // Expected: 10, 12, 0, 18
         address_i = 9;
@@ -159,7 +153,6 @@ module tb_prefetcher_3d;
         valid = 0;
 
         repeat (8) @(negedge clk);
-
 
         // =======================
         // 4x3x2 TESTS
@@ -180,7 +173,6 @@ module tb_prefetcher_3d;
 
         repeat (8) @(negedge clk);
 
-
         // Test 7: address 17 = (1,1,1)
         // Expected: 16, 18, 13, 21, 5
         address_i_4x3x2 = 17;
@@ -190,7 +182,6 @@ module tb_prefetcher_3d;
         valid_4x3x2 = 0;
 
         repeat (8) @(negedge clk);
-
 
         // Test 8: invalid address
         // 4*3*2 = 24 elements, so address 24 is out of range
@@ -202,7 +193,6 @@ module tb_prefetcher_3d;
         valid_4x3x2 = 0;
 
         repeat (8) @(negedge clk);
-
 
         // ===============
         // 1x3x3 TEST
@@ -221,7 +211,6 @@ module tb_prefetcher_3d;
         valid_1x3x3 = 0;
 
         repeat (8) @(negedge clk);
-
 
         $finish;
     end

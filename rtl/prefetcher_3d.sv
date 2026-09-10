@@ -174,8 +174,6 @@ always_comb begin
             address_o = 32'b0;
         end
     endcase
-
-
 end
 
 // Assign defaults and next state, latch input address
