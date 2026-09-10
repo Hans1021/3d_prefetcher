@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-module tb_prefetcher_3d;
+module tb_prefetcher_3d_3x3x3;
 
     logic        clk;
     logic        reset;
@@ -9,7 +9,7 @@ module tb_prefetcher_3d;
     logic        valid;
     logic        ready;
 
-    prefetcher_3d dut (
+    prefetcher_3d_3x3x3 dut (
         .clk       (clk),
         .reset     (reset),
         .address_i (address_i),

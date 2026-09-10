@@ -2,7 +2,7 @@
 
 `default_nettype none
 
-module prefetcher_3d (
+module prefetcher_3d_3x3x3 (
     input   logic           clk,
     input   logic           reset,
     input   logic   [31:0]  address_i,  // input address

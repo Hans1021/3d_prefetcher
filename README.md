@@ -23,6 +23,10 @@ The design was simulated using Verilator and inspected using GTKWave.
 | `address_o` | Output | Prefetched output address |
 | `ready` | Output | Indicates `address_o` is valid |
 
+The prefetcher accepts a new input only while in `IDLE`. If `valid`
+is asserted while a previous request is still being processed, the
+new input is not accepted.
+
 ---
 
 ## Fixed 3 x 3 x 3 Design
@@ -148,6 +152,8 @@ The design was then generalized to support:
 ```text
 X_SIZE x Y_SIZE x Z_SIZE
 ```
+
+All dimensions must be positive integers (`X_SIZE >= 1`, `Y_SIZE >= 1`, and `Z_SIZE >= 1`).
 
 The coordinate formulas become:
 
@@ -296,9 +302,9 @@ I added `stored_address` to latch the accepted request. Once processing begins, 
 
 ### First-State Timing Bug
 
-Adding `stored_address` introduced a more timing bug.
+Adding `stored_address` introduced a timing bug.
 
-The first decision for the next state was initially based on `stored_address`, but that register does not receive the newly accepted `address_i` value until the rising clock edge. This meant the FSM wrongly chooses its first direction using the previous request.
+The first decision for the next state was initially based on `stored_address`, but that register does not receive the newly accepted `address_i` value until the rising clock edge. This meant the FSM could choose its first direction using the previous request.
 
 I fixed this by using `address_i` directly for calculations while the FSM is in `IDLE`. After the request is latched and the FSM leaves `IDLE`, the calculations switch to `stored_address`.
 
