@@ -1,19 +1,29 @@
-TOP = tb_prefetcher_3d
-
-RTL = ../rtl/prefetcher_3d.sv
-TB  = tb_prefetcher_3d.sv
-
 VERILATOR = verilator
 
-all: run
+all: baseline
 
-build:
+baseline:
 	$(VERILATOR) --binary --timing --trace -Wall \
-	$(RTL) $(TB) \
-	--top-module $(TOP)
+	../rtl/prefetcher_3d.sv \
+	tb_prefetcher_3d.sv \
+	--top-module tb_prefetcher_3d
+	./obj_dir/Vtb_prefetcher_3d
 
-run: build
-	./obj_dir/V$(TOP)
+reduced:
+	rm -rf obj_dir
+	$(VERILATOR) --binary --timing --trace -Wall \
+	../rtl/prefetcher_3d_reduced.sv \
+	tb_prefetcher_3d_reduced.sv \
+	--top-module tb_prefetcher_3d_reduced
+	./obj_dir/Vtb_prefetcher_3d_reduced
+
+compare:
+	rm -rf obj_dir
+	$(VERILATOR) --binary --timing --trace -Wall \
+	../rtl/prefetcher_3d_compare.sv \
+	tb_prefetcher_3d_compare.sv \
+	--top-module tb_prefetcher_3d_compare
+	./obj_dir/Vtb_prefetcher_3d_compare
 
 clean:
 	rm -rf obj_dir

@@ -2,17 +2,31 @@
 
 ## Overview
 
-This project implements a 3D spatial prefetcher in SystemVerilog.
+This project implements a parameterized 3D spatial prefetcher in SystemVerilog.
 
 The prefetcher takes an address corresponding to a point in a 3D structure and outputs the addresses of all valid adjacent points, one per clock cycle.
 
-I first implemented a fixed `3 x 3 x 3` version, then generalized it into a parameterized `X_SIZE x Y_SIZE x Z_SIZE` design.
+The project began with a fixed `3 x 3 x 3` implementation and was then generalized to support arbitrary:
 
-The design was simulated using Verilator and inspected using GTKWave.
+```text
+X_SIZE x Y_SIZE x Z_SIZE
+```
+
+dimensions.
+
+After the parameterized implementation was completed, two additional versions were developed to investigate the hardware cost of division and modulo operations used for coordinate recovery:
+
+- **Baseline** — reconstructs x, y, and z coordinates using division and modulo.
+- **Reduced-arithmetic** — removes all division and uses only two modulo operations.
+- **Comparison-only** — removes both division and modulo and instead generates boundary-comparison logic.
+
+The implementations were verified using Verilator and synthesized with Yosys to compare their resulting logic complexity.
 
 ---
 
 ## Interface
+
+All three implementations use the same interface.
 
 | Signal | Direction | Description |
 | --- | --- | --- |
@@ -23,15 +37,41 @@ The design was simulated using Verilator and inspected using GTKWave.
 | `address_o` | Output | Prefetched output address |
 | `ready` | Output | Indicates `address_o` is valid |
 
-The prefetcher accepts a new input only while in `IDLE`. If `valid`
-is asserted while a previous request is still being processed, the
-new input is not accepted.
+The prefetcher accepts a new input only while in `IDLE`.
+
+If `valid` is asserted while a previous request is still being processed, the new input is not accepted.
+
+`ready` is used as an output-valid signal. When `ready = 1`, `address_o` contains a valid neighboring address.
 
 ---
 
-## Fixed 3 x 3 x 3 Design
+## Address Mapping
 
-The first version assumes addresses `0-26` arranged as:
+The 3D structure is flattened into a linear address space.
+
+The x coordinate changes fastest, followed by y, then z.
+
+For a parameterized:
+
+```text
+X_SIZE x Y_SIZE x Z_SIZE
+```
+
+structure, the valid address range is:
+
+```text
+0 to X_SIZE * Y_SIZE * Z_SIZE - 1
+```
+
+The neighbor address offsets are:
+
+```text
+x: +/- 1
+y: +/- X_SIZE
+z: +/- (X_SIZE * Y_SIZE)
+```
+
+For example, in a `3 x 3 x 3` structure:
 
 ### z = 0
 
@@ -57,9 +97,7 @@ The first version assumes addresses `0-26` arranged as:
 24 25 26
 ```
 
-The x coordinate changes fastest, followed by y, then z.
-
-This gives the following neighbor offsets:
+The corresponding offsets are:
 
 ```text
 x neighbors: +/- 1
@@ -67,17 +105,7 @@ y neighbors: +/- 3
 z neighbors: +/- 9
 ```
 
-Coordinates are recovered from an address using:
-
-```text
-x = addr % 3
-y = (addr / 3) % 3
-z = addr / 9
-```
-
-The coordinates are used to prevent neighbors from crossing cube boundaries.
-
-For example, address `13` is the center and produces:
+For address `13`, which is the center of the cube, the valid neighboring addresses are:
 
 ```text
 12, 14, 10, 16, 4, 22
@@ -89,39 +117,131 @@ For example, address `13` is the center and produces:
 
 The prefetcher uses the following FSM:
 
-`IDLE -> X_MINUS -> X_PLUS -> Y_MINUS -> Y_PLUS -> Z_MINUS -> Z_PLUS -> IDLE`
+```text
+IDLE
+  -> X_MINUS
+  -> X_PLUS
+  -> Y_MINUS
+  -> Y_PLUS
+  -> Z_MINUS
+  -> Z_PLUS
+  -> IDLE
+```
 
-Each direction corresponds to one possible adjacent address.
+Each directional state corresponds to one possible neighboring address.
 
-Invalid directions are skipped, so valid outputs can be produced on consecutive cycles.
+Invalid directions are skipped when selecting the next state, allowing valid output addresses to be generated on consecutive cycles without unnecessary dead cycles.
 
 While a valid neighbor is being output:
 
-`ready = 1`
+```text
+ready = 1
+```
 
-and `address_o` contains that neighbor.
+and `address_o` contains the corresponding neighboring address.
 
-While `IDLE`:
+While in `IDLE`:
 
-`ready = 0`
+```text
+ready = 0
+```
 
 ---
 
 ## Storing the Input Address
 
-A request takes multiple cycles to complete, so `address_i` may change before all neighbors are generated.
+One request can require several cycles because a point may have up to six valid neighbors.
 
-To prevent this from affecting the current request, the accepted address is copied into `stored_address`.
+The accepted request is copied into:
 
-After leaving `IDLE`, all neighbor generation uses `stored_address` instead of the live `address_i`.
+```text
+stored_address
+```
 
-One timing issue appeared when this was first added: while still in `IDLE`, `stored_address` contains the previous value until the clock edge. To fix this, the first state decision uses `address_i` directly, while only later states use `stored_address`.
+so the external `address_i` signal does not need to remain unchanged while the request is being processed.
+
+After leaving `IDLE`, neighbor generation uses `stored_address`.
+
+One timing issue appeared when this register was first introduced. While still in `IDLE`, the newly accepted value has not yet reached `stored_address` before the active clock edge.
+
+To avoid selecting the first neighbor using the previous request, the design uses the live `address_i` value while in `IDLE` and switches to `stored_address` after the request has been accepted.
 
 ---
 
-## 3 x 3 x 3 Verification
+## Baseline Parameterized Design
 
-The original `3 x 3 x 3` version was tested with the following positions:
+The baseline parameterized implementation is:
+
+```text
+rtl/prefetcher_3d.sv
+```
+
+It reconstructs the three coordinates from the flattened address using:
+
+```text
+x = addr % X_SIZE
+y = (addr / X_SIZE) % Y_SIZE
+z = addr / (X_SIZE * Y_SIZE)
+```
+
+The coordinates are then used to determine which neighboring directions are valid.
+
+The boundary conditions are:
+
+```text
+X_MINUS valid if X_SIZE > 1 and x > 0
+X_PLUS  valid if X_SIZE > 1 and x < X_SIZE - 1
+
+Y_MINUS valid if Y_SIZE > 1 and y > 0
+Y_PLUS  valid if Y_SIZE > 1 and y < Y_SIZE - 1
+
+Z_MINUS valid if Z_SIZE > 1 and z > 0
+Z_PLUS  valid if Z_SIZE > 1 and z < Z_SIZE - 1
+```
+
+### Coordinate Widths
+
+Coordinate widths are calculated using `$clog2`.
+
+A minimum width of 1 bit is used so dimensions of size 1 remain legal:
+
+```text
+X_BITS = (X_SIZE <= 1) ? 1 : ceil(log2(X_SIZE))
+Y_BITS = (Y_SIZE <= 1) ? 1 : ceil(log2(Y_SIZE))
+Z_BITS = (Z_SIZE <= 1) ? 1 : ceil(log2(Z_SIZE))
+```
+
+Explicit sized casts are used where necessary to make truncation and width conversion intentional.
+
+If a dimension has size 1, both directions on that axis are disabled.
+
+For example, if:
+
+```text
+X_SIZE = 1
+```
+
+then neither `X_MINUS` nor `X_PLUS` can be valid.
+
+### Invalid Addresses
+
+Out-of-range requests are ignored.
+
+A request is accepted only when:
+
+```text
+address_i < X_SIZE * Y_SIZE * Z_SIZE
+```
+
+Otherwise, the FSM remains in `IDLE` and produces no output.
+
+---
+
+## Verification
+
+The baseline parameterized implementation was tested using several structures.
+
+### 3 x 3 x 3
 
 | Input | Position | Expected Outputs |
 | ---: | --- | --- |
@@ -139,94 +259,9 @@ Waveform:
 
 ![3x3x3 waveform](docs/screenshots/3x3x3_waveform.png)
 
-## Note
+### 4 x 3 x 2
 
-The original fixed `3 x 3 x 3` RTL and testbench are kept in the repository for reference. The Makefile only builds and runs the final parameterized RTL and testbench discussed below.
-
----
-
-## Parameterized Design
-
-The design was then generalized to support:
-
-```text
-X_SIZE x Y_SIZE x Z_SIZE
-```
-
-All dimensions must be positive integers (`X_SIZE >= 1`, `Y_SIZE >= 1`, and `Z_SIZE >= 1`).
-
-The coordinate formulas become:
-
-```text
-x = addr % X_SIZE
-y = (addr / X_SIZE) % Y_SIZE
-z = addr / (X_SIZE * Y_SIZE)
-```
-
-The neighbor offsets become:
-
-```text
-x: +/- 1
-y: +/- X_SIZE
-z: +/- (X_SIZE * Y_SIZE)
-```
-
-Boundary checks become:
-
-```text
-X_MINUS valid if X_SIZE > 1 and x > 0
-X_PLUS  valid if X_SIZE > 1 and x < X_SIZE - 1
-
-Y_MINUS valid if Y_SIZE > 1 and y > 0
-Y_PLUS  valid if Y_SIZE > 1 and y < Y_SIZE - 1
-
-Z_MINUS valid if Z_SIZE > 1 and z > 0
-Z_PLUS  valid if Z_SIZE > 1 and z < Z_SIZE - 1
-```
-
-The valid address range is:
-
-```text
-0 to X_SIZE * Y_SIZE * Z_SIZE - 1
-```
-
-Out-of-range addresses are ignored and the FSM remains in `IDLE`.
-
----
-
-## Coordinate Widths
-
-The fixed design used 2-bit x, y, and z coordinates.
-
-For arbitrary dimensions, the required widths are calculated using `$clog2`. A minimum width of 1 bit is used so dimensions of size 1 remain valid:
-
-```text
-X_BITS = (X_SIZE <= 1) ? 1 : ceil(log2(X_SIZE))
-Y_BITS = (Y_SIZE <= 1) ? 1 : ceil(log2(Y_SIZE))
-Z_BITS = (Z_SIZE <= 1) ? 1 : ceil(log2(Z_SIZE))
-```
-
-The division and modulo expressions used to calculate coordinates produce wider results than the coordinate signals, so explicit sized casts are used when assigning x, y, and z (mostly to prevent Verilator warnings).
-
-The upper-bound comparisons also use sized casts.
-
-For dimensions of size 1, both directions on that axis are explicitly disabled. For example, if `X_SIZE = 1`, neither `X_MINUS` nor `X_PLUS` can be valid.
-
----
-
-## Parameterized Verification
-
-The parameterized design was tested with:
-
-```text
-3 x 3 x 3
-4 x 3 x 2
-1 x 3 x 3
-```
-
-The `4 x 3 x 2` case verifies that the original fixed offsets were fully removed.
-
-For `4 x 3 x 2`:
+For this configuration:
 
 ```text
 x offset = 1
@@ -234,7 +269,7 @@ y offset = 4
 z offset = 12
 ```
 
-For address `17`, the expected outputs are:
+For address `17`, the expected output sequence is:
 
 ```text
 16, 18, 13, 21, 5
@@ -246,11 +281,13 @@ Terminal results:
 
 ![Parameterized terminal results](docs/screenshots/parameterized_terminal.png)
 
-`4 x 3 x 2` waveform:
+Waveform:
 
 ![4x3x2 waveform](docs/screenshots/4x3x2_waveform.png)
 
-The `1 x 3 x 3` case verifies that dimensions of size 1 are handled correctly.
+### 1 x 3 x 3
+
+This case verifies support for dimensions of size 1.
 
 For address `4`, the expected outputs are:
 
@@ -260,9 +297,187 @@ For address `4`, the expected outputs are:
 
 with no x-direction neighbors.
 
-`1 x 3 x 3` waveform:
+Waveform:
 
 ![1x3x3 waveform](docs/screenshots/1x3x3_waveform.png)
+
+The optimized implementations were also simulated against the same behavior and produced the same output sequences as the baseline design.
+
+---
+
+## Arithmetic Optimization
+
+The baseline implementation is simple to understand, but its coordinate reconstruction contains dynamic division and modulo operations.
+
+Division and modulo by arbitrary constants can synthesize into substantial combinational logic.
+
+Two alternative implementations were therefore developed.
+
+### Reduced-Arithmetic Version
+
+File:
+
+```text
+rtl/prefetcher_3d_reduced.sv
+```
+
+This implementation removes all division operations.
+
+Instead of reconstructing x, y, and z individually, it calculates:
+
+```text
+row_position   = addr % X_SIZE
+plane_position = addr % PLANE_SIZE
+```
+
+where:
+
+```text
+PLANE_SIZE = X_SIZE * Y_SIZE
+```
+
+Boundary checks are then derived directly from these positions.
+
+The validity conditions are equivalent to:
+
+```text
+x_minus_valid =
+    X_SIZE > 1 &&
+    row_position > 0
+
+x_plus_valid =
+    X_SIZE > 1 &&
+    row_position < X_SIZE - 1
+
+y_minus_valid =
+    Y_SIZE > 1 &&
+    plane_position >= X_SIZE
+
+y_plus_valid =
+    Y_SIZE > 1 &&
+    plane_position < PLANE_SIZE - X_SIZE
+
+z_minus_valid =
+    Z_SIZE > 1 &&
+    addr >= PLANE_SIZE
+
+z_plus_valid =
+    Z_SIZE > 1 &&
+    addr < TOTAL_SIZE - PLANE_SIZE
+```
+
+where:
+
+```text
+TOTAL_SIZE = X_SIZE * Y_SIZE * Z_SIZE
+```
+
+This removes all `/` operations and leaves only two `%` operations.
+
+---
+
+### Comparison-Only Version
+
+File:
+
+```text
+rtl/prefetcher_3d_compare.sv
+```
+
+This implementation removes both division and modulo.
+
+Instead, boundary positions are generated using parameterized loops.
+
+For X boundaries, each row start and row end are checked.
+
+Conceptually:
+
+```text
+row start = row * X_SIZE
+row end   = row * X_SIZE + X_SIZE - 1
+```
+
+For Y boundaries, the first and last row of each plane are checked.
+
+Z boundaries are still determined directly using comparisons against `PLANE_SIZE`.
+
+Because the loop bounds are parameters known during elaboration, synthesis expands these loops into fixed comparison logic.
+
+This is extremely efficient for small grid dimensions, but the number of comparisons grows as the configured dimensions increase.
+
+---
+
+## Synthesis
+
+The three implementations were synthesized using Yosys 0.33.
+
+The general synthesis flow was:
+
+```text
+read_verilog -sv <rtl>;
+chparam -set X_SIZE <X> -set Y_SIZE <Y> -set Z_SIZE <Z> <top>;
+hierarchy -top <top>;
+synth -top <top>;
+stat;
+```
+
+The final generic Yosys cell count is used as a structural-area proxy.
+
+These counts are not physical silicon area or timing measurements. Actual area and timing would require mapping to a target standard-cell library and running an appropriate backend flow.
+
+---
+
+## Representative Synthesis Results
+
+| Configuration | Baseline | Reduced | Compare-only |
+| --- | ---: | ---: | ---: |
+| 3 x 3 x 3 | 15097 | 10638 | **735** |
+| 4 x 3 x 2 | 10303 | 5763 | **915** |
+| 7 x 5 x 4 | 14237 | 10085 | **873** |
+| 8 x 8 x 8 | **1029** | 1106 | 1701 |
+| 17 x 13 x 9 | 13086 | 9570 | **1819** |
+
+For small, non-power-of-two configurations, the comparison-only implementation synthesizes to dramatically fewer generic cells.
+
+The `8 x 8 x 8` case is different.
+
+Because the relevant divisors are powers of two, division and modulo can be reduced to shifts, masks, or bit selections during synthesis. In this case, the baseline arithmetic implementation becomes the smallest version.
+
+---
+
+## Scaling and Crossover
+
+A larger cube sweep was performed to determine when the generated comparison logic becomes more expensive than the arithmetic implementations.
+
+Representative crossover-region results are:
+
+| Cube Size | Baseline | Reduced | Compare-only |
+| --- | ---: | ---: | ---: |
+| 34 x 34 x 34 | 12594 | 9493 | **9395** |
+| 35 x 35 x 35 | 12010 | **8911** | 9753 |
+| 39 x 39 x 39 | 11891 | **8807** | 11812 |
+| 40 x 40 x 40 | 12489 | **9420** | 11848 |
+| 41 x 41 x 41 | 12081 | **8966** | 12802 |
+
+The comparison-only implementation first becomes larger than the reduced-arithmetic implementation at:
+
+```text
+35 x 35 x 35
+```
+
+It first becomes larger than the baseline implementation at:
+
+```text
+41 x 41 x 41
+```
+
+The generated comparison logic therefore works very well for small fixed dimensions but scales poorly as the number of row and plane boundaries increases.
+
+The arithmetic implementations do not scale monotonically with dimension size because the synthesized cost of division and modulo depends strongly on the specific constant divisors.
+
+For the tested Yosys configurations, the reduced-arithmetic implementation provides the best general-purpose tradeoff for larger arbitrary dimensions.
+
+More detailed optimization and synthesis notes are available in [notes_optimization](docs/notes_optimization.md).
 
 ---
 
@@ -270,513 +485,130 @@ with no x-direction neighbors.
 
 ### Understanding the Address Mapping
 
-At first, the main question was how the prefetcher could determine 3D neighbors when the interface only provides one address and no x, y, or z coordinates.
+The input interface provides only a flattened address rather than explicit x, y, and z coordinates.
 
-The solution was to treat the 3D structure as a flattened array. From the linear address, the x, y, and z coordinates can be reconstructed using division and modulo operations. Then, the neighboring addresses could be found using the row and plane sizes.
+The design therefore treats the structure as a flattened 3D array.
+
+This allows neighboring addresses to be determined using row and plane sizes.
+
+---
 
 ### Preventing Boundary Wraparound
 
-Simply adding and subtracting the address offsets is not enough.
+Simply adding or subtracting the neighbor offsets is not sufficient.
 
-For example, in the fixed `3 x 3 x 3` version, `addr - 1` normally represents `X_MINUS`. However, if the point is already at `x = 0`, subtracting 1 would wrap into a different row or plane instead of producing a real x neighbor.
+For example, subtracting 1 normally represents `X_MINUS`, but if the point is already at `x = 0`, the resulting address belongs to the previous row rather than representing a valid x neighbor.
 
-I resolved this by calculating the coordinates first and using a direction only when the coordinate is within bounds.
+Each implementation therefore determines whether a direction is valid before entering the corresponding FSM state.
+
+---
 
 ### Producing Multiple Outputs from One Input
 
-A single input address may have between three and six valid neighbors, but the interface only provides one `address_o`.
+A point may have between three and six valid adjacent neighbors, while the interface provides only one output address.
 
-I used an FSM with one state for each possible direction:
+The directional FSM allows these addresses to be emitted sequentially, one per cycle.
 
-```text
-IDLE -> X_MINUS -> X_PLUS -> Y_MINUS -> Y_PLUS -> Z_MINUS -> Z_PLUS
-```
+Invalid directions are skipped.
 
-The logic skips invalid directions, allowing valid prefetch addresses to be produced on consecutive cycles without pauses.
+---
 
 ### Input Address Changing During Processing
 
-One request takes several cycles to finish. Initially, using `address_i` directly for all calculations would have made the design dependent on the input remaining unchanged while the neighbors were being generated.
+A request requires several cycles.
 
-I added `stored_address` to latch the accepted request. Once processing begins, all output addresses are generated from this stored value instead of the live input.
+Using `address_i` directly throughout processing would require the source to hold the input constant.
 
-### First-State Timing Bug
+The accepted request is therefore stored internally in `stored_address`.
 
-Adding `stored_address` introduced a timing bug.
+---
 
-The first decision for the next state was initially based on `stored_address`, but that register does not receive the newly accepted `address_i` value until the rising clock edge. This meant the FSM could choose its first direction using the previous request.
+### First-State Timing
 
-I fixed this by using `address_i` directly for calculations while the FSM is in `IDLE`. After the request is latched and the FSM leaves `IDLE`, the calculations switch to `stored_address`.
+The newly accepted address does not appear in `stored_address` until the active clock edge.
 
-### Coordinate Width and Verilator Warnings
+The first next-state decision therefore uses the live `address_i`.
 
-The original design used 2-bit x, y, and z coordinates. Once the dimensions became parameters, those fixed widths were no longer sufficient.
+After leaving `IDLE`, the design uses the stored address.
 
-I used `$clog2` to calculate the required coordinate width for each dimension, while forcing a minimum width of 1 bit so dimensions of size 1 remain valid.
+---
 
-Verilator also reported truncation and width-expansion warnings because division, modulo, and integer parameters produce wider values than the coordinate signals. Explicit sized casts were added to make those conversions intentional.
+### Parameterized Widths
 
-Testing a `1 x 3 x 3` configuration showed an additional unsigned-comparison warning for the size-1 dimension, so I disabled both directions on an axis when that dimension has size 1.
+The fixed implementation originally used fixed coordinate widths.
 
-### Invalid Input Addresses
+The parameterized baseline instead calculates coordinate widths using `$clog2`, with a minimum width of one bit for dimensions of size 1.
 
-The original `3 x 3 x 3` implementation assumed that every input address was inside the structure.
+---
 
-For the parameterized design, the valid range is:
+### Division and Modulo Cost
+
+The original parameterized design reconstructs coordinates using `/` and `%`.
+
+Synthesis showed that arbitrary non-power-of-two divisors can produce substantial logic.
+
+The reduced-arithmetic and comparison-only versions were developed to investigate this cost.
+
+The synthesis results showed that eliminating arithmetic entirely is highly effective for small fixed dimensions, but generated comparison logic eventually scales beyond the arithmetic alternatives.
+
+---
+
+## Repository Structure
 
 ```text
-0 to X_SIZE * Y_SIZE * Z_SIZE - 1
+.
+├── rtl/
+│   ├── prefetcher_3d.sv
+│   ├── prefetcher_3d_reduced.sv
+│   └── prefetcher_3d_compare.sv
+│
+├── sim/
+│   ├── tb_prefetcher_3d.sv
+│   ├── tb_prefetcher_3d_reduced.sv
+│   ├── tb_prefetcher_3d_compare.sv
+│   └── Makefile
+│
+├── synth/
+│   ├── run_synth.sh
+│   ├── run_synth_large.sh
+│   ├── run_synth_crossover.sh
+│   ├── results/
+│   ├── results_large/
+│   └── results_crossover/
+│
+└── docs/
+    ├── notes_parameterized.md
+    ├── notes_optimization.md
+    └── screenshots/
 ```
 
-Without an explicit check, an out-of-range address would still be converted into coordinates and could generate meaningless outputs.
-
-The final implementation only accepts and latches a request when the address is in range. Otherwise, the FSM remains in `IDLE` and `ready` stays low.
-
----
-
-## SystemVerilog RTL
-
-```systemverilog
-`timescale 1ns/1ps
-
-`default_nettype none
-
-module prefetcher_3d #(
-    parameter int X_SIZE = 3,
-    parameter int Y_SIZE = 3,
-    parameter int Z_SIZE = 3
-) (
-    input   logic           clk,
-    input   logic           reset,
-    input   logic   [31:0]  address_i,  // input address
-    output  logic   [31:0]  address_o,  // output address(es)
-
-    input   logic           valid,      // 1 if the input address is valid, else 0
-    output  logic           ready       // 1 if the output address is valid, else 0
-);
-
-// Bits for coordinates, edge case of dimension = 1 accounted for
-localparam int X_BITS = (X_SIZE <= 1) ? 1 : $clog2(X_SIZE);
-localparam int Y_BITS = (Y_SIZE <= 1) ? 1 : $clog2(Y_SIZE);
-localparam int Z_BITS = (Z_SIZE <= 1) ? 1 : $clog2(Z_SIZE);
-
-// States
-typedef enum logic [2:0] {
-    IDLE,
-    X_MINUS,
-    X_PLUS,
-    Y_MINUS,
-    Y_PLUS,
-    Z_MINUS,
-    Z_PLUS
-} state_t;
-
-// Latched input address
-logic [31:0] stored_address;
-
-// Address coordinates
-logic [X_BITS-1:0] x;
-logic [Y_BITS-1:0] y;
-logic [Z_BITS-1:0] z;
-
-// Neighbors validity
-logic x_minus_valid, x_plus_valid, y_minus_valid, y_plus_valid, z_minus_valid, z_plus_valid;
-
-state_t state, next_state;
-
-always_comb begin
-    // Get coordinates
-    if (state == IDLE) begin
-        x = X_BITS'(address_i % X_SIZE);
-        y = Y_BITS'(address_i / X_SIZE % Y_SIZE);
-        z = Z_BITS'(address_i / (X_SIZE * Y_SIZE));
-    end else begin
-        x = X_BITS'(stored_address % X_SIZE);
-        y = Y_BITS'(stored_address / X_SIZE % Y_SIZE);
-        z = Z_BITS'(stored_address / (X_SIZE * Y_SIZE));
-    end
-
-    // Get validity
-    x_minus_valid = X_SIZE > 1 && x > 0;
-    x_plus_valid = X_SIZE > 1 && x < X_BITS'(X_SIZE - 1);
-    y_minus_valid = Y_SIZE > 1 && y > 0;
-    y_plus_valid = Y_SIZE > 1 && y < Y_BITS'(Y_SIZE - 1);
-    z_minus_valid = Z_SIZE > 1 && z > 0;
-    z_plus_valid = Z_SIZE > 1 && z < Z_BITS'(Z_SIZE - 1);
-
-    // Find next state
-    unique case (state)
-        IDLE: begin
-            // Added check for address_i in range
-            if (valid && address_i < X_SIZE * Y_SIZE * Z_SIZE) begin
-                if (x_minus_valid)
-                    next_state = X_MINUS;
-                else if (x_plus_valid)
-                    next_state = X_PLUS;
-                else if (y_minus_valid)
-                    next_state = Y_MINUS;
-                else if (y_plus_valid)
-                    next_state = Y_PLUS;
-                else if (z_minus_valid)
-                    next_state = Z_MINUS;
-                else if (z_plus_valid)
-                    next_state = Z_PLUS;
-                else
-                    next_state = IDLE;
-            end else
-                next_state = IDLE;
-
-            ready = 1'b0;
-            address_o = 32'b0;
-        end
-
-        X_MINUS: begin
-            if (x_plus_valid)
-                next_state = X_PLUS;
-            else if (y_minus_valid)
-                next_state = Y_MINUS;
-            else if (y_plus_valid)
-                next_state = Y_PLUS;
-            else if (z_minus_valid)
-                next_state = Z_MINUS;
-            else if (z_plus_valid)
-                next_state = Z_PLUS;
-            else
-                next_state = IDLE;
-
-            address_o = stored_address - 1;
-            ready = 1'b1;
-        end
-
-        X_PLUS: begin
-            if (y_minus_valid)
-                next_state = Y_MINUS;
-            else if (y_plus_valid)
-                next_state = Y_PLUS;
-            else if (z_minus_valid)
-                next_state = Z_MINUS;
-            else if (z_plus_valid)
-                next_state = Z_PLUS;
-            else
-                next_state = IDLE;
-
-            address_o = stored_address + 1;
-            ready = 1'b1;
-        end
-
-        Y_MINUS: begin
-            if (y_plus_valid)
-                next_state = Y_PLUS;
-            else if (z_minus_valid)
-                next_state = Z_MINUS;
-            else if (z_plus_valid)
-                next_state = Z_PLUS;
-            else
-                next_state = IDLE;
-
-            address_o = stored_address - X_SIZE;
-            ready = 1'b1;
-        end
-
-        Y_PLUS: begin
-            if (z_minus_valid)
-                next_state = Z_MINUS;
-            else if (z_plus_valid)
-                next_state = Z_PLUS;
-            else
-                next_state = IDLE;
-
-            address_o = stored_address + X_SIZE;
-            ready = 1'b1;
-        end
-
-        Z_MINUS: begin
-            if (z_plus_valid)
-                next_state = Z_PLUS;
-            else
-                next_state = IDLE;
-
-            address_o = stored_address - X_SIZE * Y_SIZE;
-            ready = 1'b1;
-        end
-
-        Z_PLUS: begin
-            next_state = IDLE;
-
-            address_o = stored_address + X_SIZE * Y_SIZE;
-            ready = 1'b1;
-        end
-
-        default: begin
-            next_state = IDLE;
-            ready = 1'b0;
-            address_o = 32'b0;
-        end
-    endcase
-end
-
-// Assign defaults and next state, latch input address
-always_ff @(posedge clk) begin
-    if (reset) begin
-        state <= IDLE;
-        stored_address <= 32'b0;
-    end else begin
-        // Added check for address_i in range
-        if (state == IDLE && valid && address_i < X_SIZE * Y_SIZE * Z_SIZE)
-            stored_address <= address_i;
-        state <= next_state;
-    end
-end
-
-endmodule
-
-`default_nettype wire
-
-```
-
----
-
-## Testbench
-
-```systemverilog
-`timescale 1ns/1ps
-
-module tb_prefetcher_3d;
-
-    logic clk;
-    logic reset;
-
-    // 3x3x3 DUT
-
-    logic [31:0] address_i;
-    logic [31:0] address_o;
-    logic        valid;
-    logic        ready;
-
-    prefetcher_3d dut (
-        .clk       (clk),
-        .reset     (reset),
-        .address_i (address_i),
-        .address_o (address_o),
-        .valid     (valid),
-        .ready     (ready)
-    );
-
-    // 4x3x2 DUT
-
-    logic [31:0] address_i_4x3x2;
-    logic [31:0] address_o_4x3x2;
-    logic        valid_4x3x2;
-    logic        ready_4x3x2;
-
-    prefetcher_3d #(
-        .X_SIZE(4),
-        .Y_SIZE(3),
-        .Z_SIZE(2)
-    ) dut_4x3x2 (
-        .clk       (clk),
-        .reset     (reset),
-        .address_i (address_i_4x3x2),
-        .address_o (address_o_4x3x2),
-        .valid     (valid_4x3x2),
-        .ready     (ready_4x3x2)
-    );
-
-    // 1x3x3 DUT
-
-    logic [31:0] address_i_1x3x3;
-    logic [31:0] address_o_1x3x3;
-    logic        valid_1x3x3;
-    logic        ready_1x3x3;
-
-    prefetcher_3d #(
-        .X_SIZE(1),
-        .Y_SIZE(3),
-        .Z_SIZE(3)
-    ) dut_1x3x3 (
-        .clk       (clk),
-        .reset     (reset),
-        .address_i (address_i_1x3x3),
-        .address_o (address_o_1x3x3),
-        .valid     (valid_1x3x3),
-        .ready     (ready_1x3x3)
-    );
-
-    always #5 clk <= ~clk;
-
-    // Display outputs
-    always @(posedge clk) begin
-        if (ready)
-            $display("3x3x3: time=%0t input=%0d output=%0d",
-                     $time, address_i, address_o);
-
-        if (ready_4x3x2)
-            $display("4x3x2: time=%0t input=%0d output=%0d",
-                     $time, address_i_4x3x2, address_o_4x3x2);
-
-        if (ready_1x3x3)
-            $display("1x3x3: time=%0t input=%0d output=%0d",
-                     $time, address_i_1x3x3, address_o_1x3x3);
-    end
-
-    initial begin
-
-        $dumpfile("waveform.vcd");
-        $dumpvars(0, tb_prefetcher_3d);
-
-        clk   = 0;
-        reset = 1;
-
-        address_i = 0;
-        valid     = 0;
-
-        address_i_4x3x2 = 0;
-        valid_4x3x2     = 0;
-
-        address_i_1x3x3 = 0;
-        valid_1x3x3     = 0;
-
-        // Reset
-        #20;
-        reset = 0;
-
-        // ============
-        // 3x3x3 TESTS
-        // ============
-
-        // Test 1: corner 0
-        // Expected: 1, 3, 9
-        @(negedge clk);
-        address_i = 0;
-        valid = 1;
-
-        @(negedge clk);
-        valid = 0;
-
-        repeat (8) @(negedge clk);
-
-        // Test 2: center 13
-        // Expected: 12, 14, 10, 16, 4, 22
-        address_i = 13;
-        valid = 1;
-
-        @(negedge clk);
-        valid = 0;
-
-        repeat (8) @(negedge clk);
-
-        // Test 3: corner 26
-        // Expected: 25, 23, 17
-        address_i = 26;
-        valid = 1;
-
-        @(negedge clk);
-        valid = 0;
-
-        repeat (8) @(negedge clk);
-
-        // Test 4: face point 10
-        // Expected: 9, 11, 13, 1, 19
-        address_i = 10;
-        valid = 1;
-
-        @(negedge clk);
-        valid = 0;
-
-        repeat (8) @(negedge clk);
-
-        // Test 5: edge point 9
-        // Expected: 10, 12, 0, 18
-        address_i = 9;
-        valid = 1;
-
-        @(negedge clk);
-        valid = 0;
-
-        repeat (8) @(negedge clk);
-
-        // =======================
-        // 4x3x2 TESTS
-        //
-        // x offset = 1
-        // y offset = 4
-        // z offset = 12
-        // valid addresses = 0-23
-        // =======================
-
-        // Test 6: corner 0
-        // Expected: 1, 4, 12
-        address_i_4x3x2 = 0;
-        valid_4x3x2 = 1;
-
-        @(negedge clk);
-        valid_4x3x2 = 0;
-
-        repeat (8) @(negedge clk);
-
-        // Test 7: address 17 = (1,1,1)
-        // Expected: 16, 18, 13, 21, 5
-        address_i_4x3x2 = 17;
-        valid_4x3x2 = 1;
-
-        @(negedge clk);
-        valid_4x3x2 = 0;
-
-        repeat (8) @(negedge clk);
-
-        // Test 8: invalid address
-        // 4*3*2 = 24 elements, so address 24 is out of range
-        // Expected: no output
-        address_i_4x3x2 = 24;
-        valid_4x3x2 = 1;
-
-        @(negedge clk);
-        valid_4x3x2 = 0;
-
-        repeat (8) @(negedge clk);
-
-        // ===============
-        // 1x3x3 TEST
-        //
-        // No x neighbors
-        // y offset = 1
-        // z offset = 3
-        // ===============
-
-        // Test 9: address 4 = (0,1,1)
-        // Expected: 3, 5, 1, 7
-        address_i_1x3x3 = 4;
-        valid_1x3x3 = 1;
-
-        @(negedge clk);
-        valid_1x3x3 = 0;
-
-        repeat (8) @(negedge clk);
-
-        $finish;
-    end
-
-endmodule
-
-```
+The original fixed `3 x 3 x 3` implementation may also be retained in the repository for historical reference.
 
 ---
 
 ## Simulation
 
-From the `sim` directory:
+Simulation is performed using Verilator.
 
-```bash
-make
-```
-
-The simulation generates:
+The testbenches are located in:
 
 ```text
-waveform.vcd
+sim/
 ```
 
-which can be opened with:
+The three implementations have separate testbenches:
+
+```text
+tb_prefetcher_3d.sv
+tb_prefetcher_3d_reduced.sv
+tb_prefetcher_3d_compare.sv
+```
+
+From the `sim` directory, use the Makefile to build and run the desired simulation.
+
+Generated VCD waveforms can be inspected using GTKWave.
+
+For example:
 
 ```bash
 gtkwave waveform.vcd
@@ -784,15 +616,63 @@ gtkwave waveform.vcd
 
 ---
 
+## Synthesis Scripts
+
+The synthesis experiments are located in:
+
+```text
+synth/
+```
+
+The scripts are separated by purpose:
+
+```text
+run_synth.sh
+```
+
+runs the original set of representative configurations.
+
+```text
+run_synth_large.sh
+```
+
+runs larger cube configurations to study scaling.
+
+```text
+run_synth_crossover.sh
+```
+
+runs configurations around the crossover region to identify when the comparison-only implementation becomes larger than the arithmetic implementations.
+
+---
+
 ## Final Result
 
-The final design:
+The project now contains three functionally equivalent implementations of a parameterized 3D spatial prefetcher.
 
-- supports arbitrary `X_SIZE x Y_SIZE x Z_SIZE` dimensions
-- reconstructs 3D coordinates from a flattened address
-- outputs one valid adjacent address per clock cycle
-- skips invalid directions
-- stores the active request internally
-- supports dimensions of size 1
-- rejects out-of-range addresses
-- was verified using both terminal output and GTKWave waveforms
+All versions:
+
+- support arbitrary positive `X_SIZE x Y_SIZE x Z_SIZE` dimensions
+- use flattened 3D address mapping
+- output one valid adjacent address per clock cycle
+- skip invalid directions without inserting unnecessary output gaps
+- store the active request internally
+- support dimensions of size 1
+- reject out-of-range addresses
+- preserve the same external interface and output behavior
+
+The implementations differ in how they determine boundary validity:
+
+- **Baseline:** reconstructs coordinates using division and modulo.
+- **Reduced-arithmetic:** removes division and uses two modulo operations.
+- **Comparison-only:** removes division and modulo entirely.
+
+Synthesis showed that there is no single implementation that is smallest for every parameter configuration.
+
+For small arbitrary grids, the comparison-only implementation can be dramatically smaller.
+
+For larger arbitrary dimensions, the reduced-arithmetic implementation scales better.
+
+For power-of-two dimensions, the baseline can synthesize especially efficiently because division and modulo reduce to simple binary operations.
+
+The project therefore demonstrates both the functional design of a parameterized spatial prefetcher and the hardware tradeoffs introduced by different methods of mapping a flattened address back to 3D boundaries.
