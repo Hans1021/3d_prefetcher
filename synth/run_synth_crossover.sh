@@ -22,7 +22,7 @@ run_one () {
     " | tee results_crossover/${NAME}_${N}x${N}x${N}.log
 }
 
-for N in {32..41}
+for N in {30..43}
 do
     run_one baseline \
         ../rtl/prefetcher_3d.sv \
